@@ -1,0 +1,317 @@
+---
+title: "AW_Maciej_Śmiałowski_Projekt_2"
+author: "Maciej Śmiałowski"
+date: "12 01 2021"
+output: html_document
+---
+
+<style>
+body {
+text-align: justify}
+</style></br>
+
+## Cel 
+
+Celem projektu jest utworzenie modelu VAR. Aby to zrobić w poprawny sposób niezbędne jest wybranie odpowiedniej liczby opóźnień.Zatem ważnym aspektem tej pracy będzie również dostosowanie danych do estymacji modelu. Ponadto zostaną zbadane reakcje na impuls.
+
+### Biblioteki:
+
+```{r message=FALSE, warning=FALSE}
+
+library(kableExtra)
+library(zoo) 
+library(vars)
+library(dplyr)
+library(lubridate)
+library(tseries)
+library(ggplot2)
+library(ggpubr)
+library(tidyr)
+```
+
+## Dane
+
+Dane w niniejszej pracy pochodzą ze strony https://stooq.pl odnoszą się do światowych indeksów giełdowych. Są to dane dzienne pochodzące z lat 2010-2020.
+
+Dane odnoszą się do poniższych indeksów giełdowych
+
+* **WIG**  Polski indeks giełdowy </br>
+* **DAX** Niemiecki indeks giełdowy </br>
+* **FTSE** Brytyjski indeks giełdowy </br>
+* **SHC**  Chiński indeks giełdowy </br>
+* **S&P 500** indeks giełdowy USA </br>
+
+
+Wczytywanie danych:
+```{r }
+rm(list=ls())
+temp = list.files(pattern = "*.csv")
+list2env(lapply(setNames(temp, make.names(gsub("*_d.csv$", "", temp))), read.csv), envir = .GlobalEnv)
+```
+</br>
+
+
+Połączenie danych ze wszystkich indeksów w jedną ramkę. Wykorzystane zostaną jedynie dane zamknięcia.
+
+```{r message=FALSE, warning=FALSE}
+dane <- merge(x = wig[, c(1,5)], y = X.dax[, c(1,5)], by = "Data", all = TRUE)
+dane <- merge(x = dane, y = X.ftm[, c(1,5)], by = "Data", all = TRUE)
+dane <- merge(x = dane, y = X.shc[, c(1,5)], by = "Data", all = TRUE)
+dane <- merge(x = dane, y = X.spx[, c(1,5)], by = "Data", all = TRUE)
+
+#ustawienie odpowiedniego formatu daty
+dane$Data <- ymd(dane$Data)
+#ustawienie nazw kolumn
+colnames(dane) <- c("data", "Polska", "Niemcy", "UK", "Chiny", "USA")
+```
+
+Ze względu że dane posiadają różną liczbę obserwacji zdecydowano się na uzupełnienie brakujących wartości poprzez proces interpolacji liniowej:
+
+```{r}
+dane <- data.frame(na.approx(read.zoo(dane)))
+```
+
+Podstawowe statystyki opisowe:
+
+```{r}
+summary(dane)
+```
+
+Prezentacja zestawionych danych:
+
+```{r echo=F}
+kable(dane) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>%
+  scroll_box(height = "400px")
+```
+
+</br>
+
+Graficzne przedstawienie zestawionych danych:
+
+```{r echo=FALSE, fig.align='center'}
+dane_data <- cbind(data = rownames(dane), dane)
+dane_data$data <- ymd(dane_data$data)
+rownames(dane_data) <- c()
+
+dane_long <- gather(dane_data, key = indeks, value = wartosc, -1)
+
+dane_long %>%
+  ggplot(aes(x = data, y = wartosc, col = indeks)) +
+  geom_line() +
+  labs(title = "Indeksy dzienne 2010-2020") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Funkcja licząca logarytmiczne stopy zwrotu z indeksów giełdowych.
+
+```{r}
+log_f <- function(indeks) {
+  log_stopy <- 0
+  
+  for(i in 1:length(indeks)-1) {
+    log_stopy[i] <- log(indeks[i+1] / indeks[i])
+  }
+  log_stopy
+}
+```
+
+Zastosowanie funkcji liczącej logarytmiczne stopy zwrotu z indeksów:
+
+```{r}
+stopy_df <- data.frame(sapply(dane, function(x) log_f(x)))
+stopy_df <- cbind(data = dane_data$data[-1], stopy_df)
+```
+
+```{r echo=FALSE, fig.align='center'}
+stopy_df_long <- gather(stopy_df, key = indeks, value = wartosc, -1 )
+
+stopy_df_long %>%
+  ggplot(aes(x = data, y = wartosc, col = indeks)) +
+  geom_line() +
+  labs(title = "Dzienne stopy zwrotu 2010-2020") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+</br>
+
+Graficzne przedstawianie dziennych stóp zwrotu z podziałem na poszczególne indeksy:
+
+```{r echo=FALSE, fig.align='center'}
+stopy_df_long %>%
+  ggplot(aes(x = data, y = wartosc)) +
+  geom_line() +
+  labs(title = "Dzienne stopy zwrotu 2010-2020") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  facet_wrap(~ indeks, ncol = 3)
+```
+
+</br>
+
+Następnym krokiem było sprawdzenie czy badane szeregi czasowe są stacjonarne: 
+
+```{r  warning=FALSE}
+sapply(stopy_df[2:6], adf.test)
+```
+
+Po zastosowaniu funkcji logarytmującej wszystkie p-value są niższe niż 5% stąd możemy wnioskować o stacjonarności badanych szeregów co pozwala nam przejść do kolejnych kroków.
+
+## Model VAR
+
+Pierwszym zadaniem podczas realizacji zagadnienia jakim jest estymowanie modelu VAR jest dobór opóźnień. W tym projekcie posłużono się funkcją VARselect i dzięki niej otrzymano 4 kryteria informacyjne pokazane poniżej.
+
+```{r}
+kable(VARselect(stopy_df[-1]), format = "markdown")
+```
+</br>
+Otrzymaliśmy następujące opóźnienia: dwa razy 8, 1 oraz 2. W pierwszej kolejności odrzucamy opóźnienia równe 8. W dalszej części naszych rozważań będziemy brać pod uwagę jedynie opóźnienie równe 2 oraz 1. Aby wybrać sporządzone zostaną korelogramy.
+
+* **Korelogramy** dla p=1
+
+```{r}
+var_model1 <- VAR(stopy_df[2:6], p = 1)
+par(mfrow=c(2,3))
+acf(var_model1$varresult$Polska$residuals, lag.max = 10, main="Polska, p=1")
+acf(var_model1$varresult$Niemcy$residuals, lag.max = 10, main="Niemcy, p=1")
+acf(var_model1$varresult$UK$residuals, lag.max = 10, main="UK, p=1")
+acf(var_model1$varresult$Chiny$residuals, lag.max = 10, main="Chiny, p=1")
+acf(var_model1$varresult$USA$residuals, lag.max = 10, main="USA, p=1")
+```
+
+* **Korelogramy** dla p=2
+
+```{r}
+var_model2 <- VAR(stopy_df[2:6], p = 2)
+par(mfrow=c(2,3))
+acf(var_model2$varresult$Polska$residuals, lag.max = 10, main="Polska, p=2")
+acf(var_model2$varresult$Niemcy$residuals, lag.max = 10, main="Niemcy, p=2")
+acf(var_model2$varresult$UK$residuals, lag.max = 10, main="UK, p=2")
+acf(var_model2$varresult$Chiny$residuals, lag.max = 10, main="Chiny, p=2")
+acf(var_model2$varresult$USA$residuals, lag.max = 10, main="USA, p=2")
+```
+
+Korelogramy nie dają nam jasnej odpowiedzi na pytanie które opóźnienie jest lepsze. Wszystkie wykresy są bardzo podobne. Z uwagi na ten fakt, w oparciu o uzyskaną wiedzę, w dalszych badaniach posłużymy się opóźnieniem równym 2. 
+
+
+* **Autokorelacja**
+
+Aby zbadać czy nie występuje autokorelacja reszt oraz czy dane są niezależne przeprowadzono testy  Ljunga-Boxa.
+
+```{r echo=FALSE}
+var_2reszty1 <-var_model2$varresult$Polska$residuals
+Box.test(var_2reszty1, lag =2, type=c("Ljung-Box")) 
+
+var_2reszty2 <-var_model2$varresult$Niemcy$residuals
+Box.test(var_2reszty2, lag =2, type=c("Ljung-Box"))
+
+var_2reszty3 <-var_model2$varresult$UK$residuals
+Box.test(var_2reszty3, lag =2, type=c("Ljung-Box"))
+
+var_2reszty4 <-var_model2$varresult$Chiny$residuals
+Box.test(var_2reszty4, lag =2, type=c("Ljung-Box"))
+
+var_2reszty5 <-var_model2$varresult$USA$residuals
+Box.test(var_2reszty5, lag =2, type=c("Ljung-Box"))
+```
+
+W przypadku każdej zmiennej brak było podstaw do odrzucenia hipotezy zerowej co daje podstawy do wnioskowania iż dane są niezależne oraz wśród reszt nie występuje autokorelacja.
+
+* **Finalny Model VAR**
+
+
+```{r}
+var_model <- VAR(stopy_df[2:6], p = 2)
+summary(var_model)
+```
+
+</br>
+Analizując otrzymane modele jesteśmy w stanie odpowiedzieć na pytania jaki wpływ mają na siebie wybrane gospodarki z całego świata. Pierwszą rzeczą na jaką powinniśmy zwrócić uwagę jest silne powiązanie giełdy polskiej oraz giełdy Stanów Zjednoczonych zarówno pierwsze jak i drugie opóźnieni wskazują na bardzo silne powiązania. Opóźnienie pierwszego rzędu wskazuje również na powiązania Polski z giełdą Wielkiej Brytanii. Bardzo podobnie sprawa wygląda w przypadku giełdy niemieckiej jak i Brytyjskiej, wynika to z faktu gdyż kraje te są ściśle powiązane z USA. Zapewne zupełnie inaczej wyglądało by to dla krajów takich jak Białoruś czy Ukraina które są mocniej powiązane z Rosją niż z USA.
+W przypadku drugiej gospodarki na świecie widać powiązania z USA wynika to zapewne z faktu iż gospodarki Stanów oraz Chin są największymi na świecie i nie sposób by nie oddziaływały na siebie.
+Natomiast jeśli chodzi o same Stany Zjednoczone to zaskakującym może być fakt iż model wskazuje Polską giełdę jaką ta która ma wpływ na giełdę Stanów Zjednoczonych możemy przypuszczać że powodem tego jest fakt, iż Polska jest tak mocno powiązana z USA  że samo USA jest powiązane z Polską.
+
+</br>
+Na przyjętym poziomie istotności 0,05 zależności wyglądają tka jak opisano powyżej, gdbyśmy przyjęli inny poziom istotności sytuacja mogła by wyglądać inaczej lecz nie w przypadku wszystkich krajów.
+
+
+
+### Przyczynowość w sensie Grangera
+
+* **Test Grangera**
+
+$H_0:$ wszystkie parametry dla badanych rynków są sobie równe i wynoszą 0  
+$H_1:$ przynajmniej jeden parametr z badanych jest różny od 0. 
+
+W pierwszej kolejności zbadamy wpływ pozostałych giełd na giełdę Polską.
+
+```{r}
+causality(var_model, cause = c("Niemcy", "UK", "Chiny", "USA"))$Granger
+```
+
+Dla poziomu istotności 0,05 p-value przyjmuję taką postać, iż mamy podstawy do odrzucenia H0 możemy zatem wnioskować że wymienione giełdy wpływają na giełdę Polska. Inaczej mówiąc są jej przyczynami w sensie Grangera.
+
+Następnym krokiem będzie ocenieni przyczynowości w sensie Grangera dla pozostałych giełd. Hipotezy będą wyglądać następująco:
+
+$H_0:$ badany czynnik wynosi 0, tzn. nie ma wpływu na pozostałe  
+$H_1:$ wartość badanego czynnika jest różna od 0; ma on wpływ na pozostałe czynniki 
+```{r}
+causality(var_model, cause = "Polska")$Granger
+```
+
+W powyższym przypadku p-value wynosi 0.008703 jest to więcej niż 5% stąd możemy wniskowac że w tym przypadku nie zachodzi przyczynowość w sesnie Grangera względem pozostałych giełd.
+
+```{r}
+causality(var_model, cause = "Niemcy")$Granger
+```
+
+
+W powyższym przypadku p-value wynosi 0.008703 jest to więcej niż 5% stąd możemy wniskowac że w tym przypadku nie zachodzi przyczynowość w sesnie Grangera względem pozostałych giełd.
+
+```{r}
+causality(var_model, cause = "UK")$Granger
+```
+
+W powyższym przypadku p-value wynosi 1.403e-06 jest to więcej niż 5% stąd możemy wniskowac że w tym przypadku  zachodzi przyczynowość w sesnie Grangera względem pozostałych giełd.
+
+
+```{r}
+causality(var_model, cause = "Chiny")$Granger
+```
+
+W powyższym przypadku p-value wynosi 0.04402 jest to mniej niż 5% stąd możemy wniskowac że w tym przypadku zachodzi przyczynowość w sesnie Grangera względem pozostałych giełd.
+
+```{r}
+causality(var_model, cause = "USA")$Granger
+```
+
+W powyższym przypadku p-value jest mnijesze niż 2.2e-16 jest to więcej niż 5% stąd możemy wniskowac że w tym przypadku zachodzi przyczynowość w sesnie Grangera względem pozostałych giełd.
+
+## Reakcja na impuls
+
+```{r}
+impuls_1<-irf(var_model, impulse="Polska", response=c("Niemcy", "UK", "Chiny", "USA"), n.ahead=5, ortho=TRUE, runs=100)
+plot(impuls_1, main="Reakcja na impuls - Polska")
+```
+
+Pierwszy z wykresów nie pokazuje zbyt wiele widać. Co prawda niewielka reakcje giełdy USA po wytworzeniu impulsu z giełdy Polskiej. Reakcja ta jednak zanika już po 2 dniach, a wynika zapewne z powiązań omawianych we wcześniejszej części projektu.
+
+```{r}
+impuls_2<-irf(var_model, impulse="Niemcy", response=c("UK", "Chiny", "USA"), n.ahead=5, ortho=TRUE, runs=100)
+plot(impuls_2, main="Reakcja na impuls - Niemcy")
+```
+
+Podobnie jak w przypadku generowania impulsu z giełdy Polskiej w przypadku Niemiec również największą reakcje możemy zaobserwować na giełdzie w USA. Wykres szybko jednak wraca do normy.
+
+```{r}
+impuls_3<-irf(var_model, impulse="UK", response=c("Chiny", "USA"), n.ahead=5, ortho=TRUE, runs=100)
+plot(impuls_3, main="Reakcja na impuls - Wielka Brytania")
+```
+
+Trzeci z przedstawionych wykresów pokazuje reakcje na impuls z giełdy w Wielkiej Brytanii. O ile reakcja giełdy Chińskiej nie jest zbyt duża to w przypadku giełdy Stanów Zjednoczonych możemy zaobserwować dość dynamiczny wzrost.
+
+```{r}
+impuls_4<-irf(var_model, impulse="Chiny", response=c("USA"), n.ahead=5, ortho=TRUE, runs=100)
+plot(impuls_4, main="Reakcja na impuls - Chiny")
+```
+
+Wykres ostatni jest najbardziej interesujący, a zarazem pokazuje najwięcej, wynika to z faktu iż są to dwie największe światowe gospodarki. W pierwszym dniu widać wyraźny spadek na giełdzie w USA po wyemitowaniu impulsu na giełdzie w Chinach. Zupełnie inaczej niż w przypadku pozostałych wykresów poziom wraca do normy dopiero po kilku dniach.
+
